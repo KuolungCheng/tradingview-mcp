@@ -1,0 +1,164 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © Kuolung
+
+//@version=6
+strategy('[ST] SMC+STrend Cursor', 'CR', 
+     calc_on_every_tick = false, 
+     overlay = true, 
+     max_labels_count = 500, 
+     max_lines_count = 500, 
+     initial_capital = 10000, 
+     default_qty_type = strategy.percent_of_equity, 
+     default_qty_value = 95, 
+     commission_type = strategy.commission.percent, 
+     commission_value = 0.1)
+
+// ==========================================
+// === CURSOR'S EDGE: SMARTER EXITS       ===
+// ==========================================
+// Same entry as winners, but optimize exits
+// Focus: Capture more of the trend with intelligent trailing
+
+CORE_GROUP = 'Core Settings'
+atrPeriod = input.int(11, 'ATR Period', group = CORE_GROUP)
+multiplier = input.float(3.7, 'SuperTrend Multiplier', step = 0.1, group = CORE_GROUP)
+structurePeriod = input.int(25, 'Structure Period', group = CORE_GROUP)
+
+FILTER_GROUP = 'Filters'
+useRegimeFilter = input.bool(true, 'Enable Regime Filter', group = FILTER_GROUP)
+adxLength = input.int(14, 'ADX Length', group = FILTER_GROUP)
+adxThreshold = input.float(14.0, 'ADX Threshold', group = FILTER_GROUP, step = 0.5)
+atrVolLength = input.int(30, 'ATR Mean Length', group = FILTER_GROUP)
+atrVolMinRatio = input.float(0.75, 'Min ATR Ratio', group = FILTER_GROUP, step = 0.05)
+
+useMTFFilter = input.bool(true, 'Enable Weekly Filter', group = FILTER_GROUP)
+
+RISK_GROUP = 'Exit Management'
+// Cursor's edge: More aggressive trailing to capture trends
+stopATR = input.float(1.2, 'Initial Stop ATR', group = RISK_GROUP, step = 0.1)
+useTrailing = input.bool(true, 'Enable ATR Trailing', group = RISK_GROUP)
+trailATR = input.float(2.0, 'Trailing ATR', group = RISK_GROUP, step = 0.1)
+
+// Additional: Momentum-based trailing tightening
+useMomentumTrail = input.bool(true, 'Enable Momentum Trail', group = RISK_GROUP)
+rsiLength = input.int(14, 'RSI Length', group = RISK_GROUP)
+rsiOverbought = input.float(70.0, 'RSI Overbought', group = RISK_GROUP)
+
+BACKTEST_GROUP = 'Backtest'
+useDateFilter = input.bool(true, 'Enable Date Range', group = BACKTEST_GROUP)
+startDate = input.time(timestamp('2021-12-31 00:00'), 'Start Date', group = BACKTEST_GROUP)
+endDate = input.time(timestamp('2100-12-31 23:59'), 'End Date', group = BACKTEST_GROUP)
+cooldown = input.int(2, 'Cooldown Bars', group = BACKTEST_GROUP, minval = 0)
+
+// ==========================================
+// === CALCULATIONS                       ===
+// ==========================================
+
+// SuperTrend
+src = hlcc4
+atr = ta.atr(atrPeriod)
+up = src - multiplier * atr
+dn = src + multiplier * atr
+
+var float trendUp = na
+var float trendDn = na
+var int trendDir = 1
+
+prevUp = nz(trendUp[1], up)
+prevDn = nz(trendDn[1], dn)
+
+trendUp := close[1] > prevUp ? math.max(up, prevUp) : up
+trendDn := close[1] < prevDn ? math.min(dn, prevDn) : dn
+trendDir := close > prevDn ? 1 : close < prevUp ? -1 : nz(trendDir[1], 1)
+
+// Filters
+[_, _, adxValue] = ta.dmi(adxLength, adxLength)
+atrMean = ta.sma(atr, atrVolLength)
+atrRatio = atr / math.max(atrMean, syminfo.mintick)
+regimeOk = not useRegimeFilter or (adxValue >= adxThreshold and atrRatio >= atrVolMinRatio)
+
+currentTF = timeframe.isminutes ? timeframe.multiplier : timeframe.isdaily ? 1440 : timeframe.isweekly ? 10080 : 100000
+weeklyTrend = request.security(syminfo.tickerid, 'W', trendDir, gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+weeklyMom = request.security(syminfo.tickerid, 'W', close > close[1], gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+mtfOk = not useMTFFilter or currentTF >= 10080 or weeklyTrend == 1 or weeklyMom
+
+// Entry logic - SIMPLE, like winners
+structureBreak = close > ta.highest(high, structurePeriod)[1]
+entryCondition = trendDir == 1 and structureBreak and regimeOk and mtfOk
+
+// Cooldown
+var int lastExitBar = 0
+barsSinceExit = bar_index - lastExitBar
+canTrade = barsSinceExit > cooldown
+
+buySignal = entryCondition and canTrade and not entryCondition[1]
+sellSignal = trendDir == -1 and trendDir[1] == 1
+
+// Momentum indicator for exit optimization
+rsi = ta.rsi(close, rsiLength)
+
+// ==========================================
+// === STRATEGY EXECUTION                 ===
+// ==========================================
+
+var float entryPrice = na
+var float stopPrice = na
+var float highestPrice = na
+
+inRange = useDateFilter ? (time >= startDate and time <= endDate) : true
+
+// Entry - ONLY when no position
+if buySignal and inRange and strategy.position_size <= 0
+    entryPrice := close
+    stopPrice := close - atr * stopATR
+    highestPrice := close
+    strategy.entry('Long', strategy.long)
+
+// Exit on trend reversal
+if sellSignal and strategy.position_size > 0
+    strategy.close('Long', comment = 'Trend Exit')
+    lastExitBar := bar_index
+
+// Dynamic stop management
+if strategy.position_size > 0
+    if na(entryPrice)
+        entryPrice := strategy.position_avg_price
+        stopPrice := entryPrice - atr * stopATR
+        highestPrice := close
+    
+    // Track highest price in trade
+    highestPrice := math.max(highestPrice, high)
+    
+    // Standard ATR trailing
+    if useTrailing
+        trail = close - atr * trailATR
+        stopPrice := math.max(stopPrice, trail)
+    
+    // Cursor's edge: Tighten trailing when momentum weakens
+    if useMomentumTrail and rsi >= rsiOverbought
+        // When RSI overbought, use tighter trailing
+        tightTrail = close - atr * (trailATR * 0.7)
+        stopPrice := math.max(stopPrice, tightTrail)
+    
+    strategy.exit('Exit', 'Long', stop = stopPrice)
+
+// Reset
+if strategy.position_size <= 0 and strategy.position_size[1] > 0
+    entryPrice := na
+    stopPrice := na
+    highestPrice := na
+
+// ==========================================
+// === VISUALIZATION                      ===
+// ==========================================
+
+plot(trendDir == 1 ? trendUp : na, 'Support', color.new(color.green, 0), 2, plot.style_linebr)
+plot(trendDir == -1 ? trendDn : na, 'Resistance', color.new(color.red, 0), 2, plot.style_linebr)
+
+plotshape(buySignal, 'BUY', shape.labelup, location.belowbar, 
+     color.new(color.green, 0), text = 'BUY', textcolor = color.white, size = size.normal)
+
+plotshape(sellSignal and strategy.position_size > 0, 'SELL', shape.labeldown, location.abovebar, 
+     color.new(color.red, 0), text = 'SELL', textcolor = color.white, size = size.normal)
+
+barcolor(trendDir == 1 ? color.new(color.green, 70) : color.new(color.red, 70))
