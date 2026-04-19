@@ -1,0 +1,127 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © Kuolung
+
+//@version=6
+strategy('[ST] SMC+STrend Gemini', 'GM', calc_on_every_tick = false, overlay = true, max_labels_count = 500, max_lines_count = 500, initial_capital = 10000, default_qty_type = strategy.percent_of_equity, default_qty_value = 95, commission_type = strategy.commission.percent, commission_value = 0.1)
+
+// ==========================================
+// === CORE SETTINGS                      ===
+// ==========================================
+
+// ATR Period: Determines the lookback for volatility.
+// Higher: Smoother trend lines, slower reaction to price changes.
+// Lower: Faster reaction, but highly prone to market noise/whipsaws.
+atrPeriod = input.int(11, 'ATR Period', group = 'Core Settings', 
+     tooltip = 'Lookback for volatility calculation. Recommended range: 10-14.')
+
+// SuperTrend Multiplier: Defines the "breathing room" given to the price.
+// 3.7: This specific value was proven effective in the EX version for catching major trends.
+// Higher (>3.7): Reduces trading frequency, filters more noise, but delays entry/exit.
+// Lower (<3.0): Tightens trailing stops, may catch small moves but results in frequent stop-outs.
+multiplier = input.float(3.7, 'SuperTrend Multiplier', step = 0.1, group = 'Core Settings', 
+     tooltip = 'Distance between price and the trend line. 3.7 is the proven baseline.')
+
+// Breakout Lookback (Donchian): Period to confirm upward momentum.
+// Higher (e.g., 50): Requires breaking multi-month highs, very safe but enters very late.
+// Lower (e.g., 10): Enters early during minor bounces but prone to "bull traps".
+// 25: The balanced setting for mid-to-long term trends.
+lb = input.int(25, 'Breakout Lookback', group = 'Core Settings', 
+     tooltip = 'Confirms momentum. Price must close above the highest high of this period.')
+
+// ==========================================
+// === OPTIMIZATION & PROTECTION          ===
+// ==========================================
+
+// Enable Volume Filter: Ensures moves are backed by institutional participation.
+useVolFilter = input.bool(true, 'Enable Volume Filter', group = 'Optimization')
+
+// Min Volume Multiplier: Threshold relative to the 20-day moving average.
+// 1.0: Requires volume to be at least the daily average.
+// Higher (>1.2): Only enters on high-conviction "surge" volume.
+// Lower (<1.0): Increases trade frequency by allowing low-volume breakouts.
+volMult = input.float(1.0, 'Min Vol Multiplier', group = 'Optimization', step = 0.1, 
+     tooltip = 'Multiplied against 20-day Volume MA. 1.0 = Average volume required.')
+
+// Enable Breakeven Stop: Moves stop loss to entry price after hitting a profit target.
+useBreakeven = input.bool(true, 'Enable Breakeven Stop', group = 'Optimization')
+
+// Breakeven Trigger (Risk-Reward RR): 
+// Lower (1.0): Locks in safety very early, but high risk of being stopped out on minor retests.
+// Higher (2.0): Gives the trend more room to develop before removing the risk.
+beTriggerRR = input.float(1.5, 'BE Trigger (RR)', group = 'Optimization', step = 0.1, 
+     tooltip = 'Multiple of initial risk reached before moving stop to entry price.')
+
+// ==========================================
+// === BACKTEST SETTINGS                  ===
+// ==========================================
+
+useDateFilter = input.bool(true, 'Enable Date Filter', group = 'Backtest')
+startDate = input.time(timestamp('2021-12-31 00:00'), 'Start Date', group = 'Backtest')
+endDate = input.time(timestamp('2100-12-31 23:59'), 'End Date', group = 'Backtest')
+
+// === SuperTrend Calculation ===
+src = hlcc4
+atr = ta.atr(atrPeriod)
+up = src - multiplier * atr
+dn = src + multiplier * atr
+
+var float trendUp = na
+var float trendDn = na
+var int trendDir = 1
+
+prevTrendUp = nz(trendUp[1], up)
+prevTrendDn = nz(trendDn[1], dn)
+
+trendUp := close[1] > prevTrendUp ? math.max(up, prevTrendUp) : up
+trendDn := close[1] < prevTrendDn ? math.min(dn, prevTrendDn) : dn
+trendDir := close > prevTrendDn ? 1 : close < prevTrendUp ? -1 : nz(trendDir[1], 1)
+
+// === Multi-Timeframe (MTF) Filter ===
+weeklyTrend = request.security(syminfo.tickerid, 'W', trendDir, lookahead = barmerge.lookahead_off)
+weeklyMom = request.security(syminfo.tickerid, 'W', close > close[1], lookahead = barmerge.lookahead_off)
+mtfOk = weeklyTrend == 1 or weeklyMom
+
+// === Volume Confirmation ===
+volMa = ta.sma(volume, 20)
+volOk = not useVolFilter or (volume > volMa * volMult)
+
+// === Entry & Exit Logic ===
+isValidStructure = close > ta.highest(high, lb)[1]
+longCondition = trendDir == 1 and isValidStructure and mtfOk and volOk
+
+finalBuy = longCondition and not longCondition[1]
+finalSell = trendDir == -1 and trendDir[1] == 1
+
+// === Execution ===
+var float entryPrice = na
+var bool beArmed = false
+inRange = useDateFilter ? (time >= startDate and time <= endDate) : true
+
+if finalBuy and inRange and strategy.position_size <= 0
+    strategy.entry('Long', strategy.long)
+    entryPrice := close
+    beArmed := false
+
+if strategy.position_size > 0
+    // Estimate initial risk for RR calculation (1.5x ATR)
+    risk = entryPrice - (entryPrice - atr[1] * 1.5) 
+    if high >= entryPrice + risk * beTriggerRR
+        beArmed := true
+
+    exitTrend = trendDir == -1
+    exitBE = useBreakeven and beArmed and low <= entryPrice
+    
+    if exitTrend
+        strategy.close('Long', comment = 'Trend Exit')
+    else if exitBE
+        strategy.close('Long', comment = 'Breakeven Exit')
+
+if strategy.position_size <= 0
+    entryPrice := na
+    beArmed := false
+
+// === Visuals ===
+plot(trendDir == 1 ? trendUp : na, 'SuperTrend Support', color.new(color.green, 0), 2, plot.style_linebr)
+plotshape(finalBuy, 'BUY', shape.labelup, location.belowbar, color.green, text = 'BUY', textcolor = color.white, size = size.tiny)
+plotshape(finalSell, 'SELL', shape.labeldown, location.abovebar, color.red, text = 'SELL', textcolor = color.white, size = size.tiny)
+barcolor(beArmed ? color.new(color.yellow, 50) : strategy.position_size > 0 ? color.new(color.green, 80) : na)

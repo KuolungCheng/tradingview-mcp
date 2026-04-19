@@ -2,7 +2,7 @@
 // © Kuolung
 
 //@version=6
-strategy('[EXs] SMC+STrend EX', 'EX', calc_on_every_tick = false, overlay = true, max_labels_count = 500, max_lines_count = 500, initial_capital = 10000, default_qty_type = strategy.percent_of_equity, default_qty_value = 95, commission_type = strategy.commission.percent, commission_value = 0.1)
+strategy('[ST] SMC+STrend Copilot', 'CP', calc_on_every_tick = false, overlay = true, max_labels_count = 500, max_lines_count = 500, initial_capital = 10000, default_qty_type = strategy.percent_of_equity, default_qty_value = 95, commission_type = strategy.commission.percent, commission_value = 0.1)
 
 // === Core Parameters ===
 // SuperTrend ATR length. Higher = smoother/slower; lower = faster/noisier.
