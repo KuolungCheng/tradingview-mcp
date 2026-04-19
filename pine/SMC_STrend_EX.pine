@@ -2,7 +2,7 @@
 // © Kuolung
 
 //@version=6
-strategy('[ST] SMC+STrend EX', 'EX', calc_on_every_tick = false, overlay = true, max_labels_count = 500, max_lines_count = 500, initial_capital = 10000, default_qty_type = strategy.percent_of_equity, default_qty_value = 95, commission_type = strategy.commission.percent, commission_value = 0.1)
+strategy('[EXs] SMC+STrend EX', 'EX', calc_on_every_tick = false, overlay = true, max_labels_count = 500, max_lines_count = 500, initial_capital = 10000, default_qty_type = strategy.percent_of_equity, default_qty_value = 95, commission_type = strategy.commission.percent, commission_value = 0.1)
 
 // === Core Parameters ===
 // SuperTrend ATR length. Higher = smoother/slower; lower = faster/noisier.
@@ -152,7 +152,10 @@ displayStructure(bool internal) =>
     bearColor = internal ? internalBearColorInput : swingBearColorInput
     sizeInput = internal ? internalStructureSize : swingStructureSize
 
-    if not na(highPivot.currentLevel) and ta.crossover(close, highPivot.currentLevel) and not highPivot.crossed
+    highPivotCrossUp = ta.crossover(close, highPivot.currentLevel)
+    lowPivotCrossDown = ta.crossunder(close, lowPivot.currentLevel)
+
+    if not na(highPivot.currentLevel) and highPivotCrossUp and not highPivot.crossed
         isChoch = t.bias == BEARISH
         if shouldShow(bullType, isChoch)
             tag = isChoch ? 'CHoCH' : 'BOS'
@@ -160,7 +163,7 @@ displayStructure(bool internal) =>
         highPivot.crossed := true
         t.bias := BULLISH
 
-    if not na(lowPivot.currentLevel) and ta.crossunder(close, lowPivot.currentLevel) and not lowPivot.crossed
+    if not na(lowPivot.currentLevel) and lowPivotCrossDown and not lowPivot.crossed
         isChoch = t.bias == BULLISH
         if shouldShow(bearType, isChoch)
             tag = isChoch ? 'CHoCH' : 'BOS'
