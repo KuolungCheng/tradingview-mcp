@@ -127,3 +127,9 @@ Claude Code ←→ MCP Server (stdio) ←→ CDP (localhost:9222) ←→ Trading
 ```
 
 Pine graphics path: `study._graphics._primitivesCollection.dwglines.get('lines').get(false)._primitivesDataById`
+
+## Persistent Editing Preferences
+
+- For Pine strategy inputs that materially affect behavior, place explanatory comments **above** the input statement.
+- Do not put long explanations in right-side `tooltip` text for those important inputs.
+- Keep parameter explanations concise and include directional impact (higher vs lower value behavior).

@@ -1,0 +1,261 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © Kuolung
+
+//@version=6
+strategy('[ST] SMC+STrend EX', 'EX', calc_on_every_tick = false, overlay = true, max_labels_count = 500, max_lines_count = 500, initial_capital = 10000, default_qty_type = strategy.percent_of_equity, default_qty_value = 95, commission_type = strategy.commission.percent, commission_value = 0.1)
+
+// === Core Parameters ===
+// SuperTrend ATR length. Higher = smoother/slower; lower = faster/noisier.
+atrPeriod = input.int(11, 'SuperTrend ATR Period')
+// SuperTrend band multiplier. Higher = fewer/later signals; lower = more/earlier signals.
+multiplier = input.float(3.7, 'SuperTrend Multiplier', step = 0.1)
+// Structure breakout lookback. Higher = stricter entries; lower = more frequent entries.
+lb = input.int(25, 'SMC Structure Period')
+
+useDateFilter = input.bool(true, title = 'Enable Date Range Filter', group = 'Backtest Settings')
+startDate = input.time(timestamp('2021-12-31 00:00'), title = 'Start Date', group = 'Backtest Settings')
+endDate = input.time(timestamp('2100-12-31 23:59'), title = 'End Date', group = 'Backtest Settings')
+
+REGIME_GROUP = 'Market Regime Filter'
+// Enable/disable market regime gating (ADX + ATR ratio). On = fewer trades in weak markets.
+useRegimeFilter = input.bool(true, 'Enable Trend/Volatility Filter', group = REGIME_GROUP)
+// ADX smoothing length. Higher = steadier regime state; lower = more reactive.
+adxLength = input.int(14, 'ADX Length', group = REGIME_GROUP, minval = 5)
+// ADX minimum trend strength. Higher = stricter filter, fewer entries.
+adxThreshold = input.float(14.0, 'ADX Minimum Threshold', group = REGIME_GROUP, step = 0.5)
+// ATR mean lookback. Higher = slower volatility baseline.
+atrVolLength = input.int(30, 'ATR Mean Length', group = REGIME_GROUP, minval = 5)
+// Minimum ATR/ATR-mean ratio. Higher = needs hotter volatility; lower = allows calmer trends.
+atrVolMinRatio = input.float(0.75, 'Min ATR/ATR Mean Ratio', group = REGIME_GROUP, step = 0.05)
+
+RISK_GROUP = 'Risk Management'
+// Layered exits (TP1/TP2 + breakeven + trailing). Off = hold until trend close logic.
+useLayeredExit = input.bool(false, 'Enable Layered Exit', group = RISK_GROUP)
+// Initial ATR stop distance. Higher = wider stop; lower = tighter stop.
+stopAtrMult = input.float(1.2, 'Initial Stop ATR Multiplier', group = RISK_GROUP, step = 0.1, minval = 0.1)
+// TP1 target in R multiple. Higher = farther TP1.
+tp1RR = input.float(2.0, 'TP1 Risk-Reward', group = RISK_GROUP, step = 0.1, minval = 0.2)
+// Portion sold at TP1. Lower = keep more size for trend continuation.
+tp1Qty = input.float(10.0, 'TP1 Exit Qty (%)', group = RISK_GROUP, step = 5.0, minval = 5.0, maxval = 95.0)
+// TP2 target in R multiple. Higher = farther runner target.
+tp2RR = input.float(6.0, 'TP2 Risk-Reward', group = RISK_GROUP, step = 0.1, minval = 0.5)
+// RR level to activate breakeven logic. Higher = less early stop-out.
+breakevenRR = input.float(2.0, 'Breakeven Trigger RR', group = RISK_GROUP, step = 0.1, minval = 0.1)
+breakevenOffsetPct = input.float(0.05, 'Breakeven Offset (%)', group = RISK_GROUP, step = 0.01, minval = 0.0)
+useAtrTrail = input.bool(true, 'Enable ATR Trailing Stop', group = RISK_GROUP)
+// ATR trailing distance. Higher = looser trail and longer holds.
+trailAtrMult = input.float(2.5, 'Trailing Stop ATR Multiplier', group = RISK_GROUP, step = 0.1, minval = 0.1)
+
+EXECUTION_GROUP = 'Execution Control'
+// Waiting bars after any close before new entries. Higher = fewer re-entries.
+cooldownBars = input.int(2, 'Cooldown Bars After Exit', group = EXECUTION_GROUP, minval = 0)
+
+// === SMC Visualization (Simplified) ===
+ALL = 'All'
+BOS = 'BOS'
+CHOCH = 'CHoCH'
+BULLISH_LEG = 1
+BEARISH_LEG = 0
+BULLISH = 1
+BEARISH = -1
+
+SMC_GROUP = 'SMC Structure'
+INTERNAL_GROUP = 'Internal Structure'
+SWING_GROUP = 'Swing Structure'
+
+showInternalsInput = input.bool(true, 'Show Internal Structure', group = INTERNAL_GROUP)
+showInternalBullInput = input.string(ALL, 'Structure Filter A', group = INTERNAL_GROUP, inline = 'ibull', options = [ALL, BOS, CHOCH])
+internalBullColorInput = input.color(color.green, '', group = INTERNAL_GROUP, inline = 'ibull')
+showInternalBearInput = input.string(ALL, 'Structure Filter B', group = INTERNAL_GROUP, inline = 'ibear', options = [ALL, BOS, CHOCH])
+internalBearColorInput = input.color(color.red, '', group = INTERNAL_GROUP, inline = 'ibear')
+internalLengthInput = input.int(4, 'Internal Structure Period', group = INTERNAL_GROUP, minval = 2)
+internalStructureSize = input.string('tiny', 'Internal Label Size', group = INTERNAL_GROUP, options = ['tiny', 'small', 'normal'])
+
+showSwingStructureInput = input.bool(true, 'Show Swing Structure', group = SWING_GROUP)
+showSwingBullInput = input.string(ALL, 'Structure Filter A', group = SWING_GROUP, inline = 'sbull', options = [ALL, BOS, CHOCH])
+swingBullColorInput = input.color(color.green, '', group = SWING_GROUP, inline = 'sbull')
+showSwingBearInput = input.string(ALL, 'Structure Filter B', group = SWING_GROUP, inline = 'sbear', options = [ALL, BOS, CHOCH])
+swingBearColorInput = input.color(color.red, '', group = SWING_GROUP, inline = 'sbear')
+swingsLengthInput = input.int(50, 'Swing Structure Period', group = SWING_GROUP, minval = 10)
+swingStructureSize = input.string('small', 'Swing Label Size', group = SWING_GROUP, options = ['tiny', 'small', 'normal'])
+
+showTrendCandleColorInput = input.bool(false, 'Color Candles by SuperTrend', group = SMC_GROUP)
+
+type pivot
+    float currentLevel
+    bool crossed
+    int barTime
+    int barIndex
+
+type trend
+    int bias
+
+var pivot swingHigh = pivot.new(na, false, na, na)
+var pivot swingLow = pivot.new(na, false, na, na)
+var pivot internalHigh = pivot.new(na, false, na, na)
+var pivot internalLow = pivot.new(na, false, na, na)
+var trend swingTrend = trend.new(0)
+var trend internalTrend = trend.new(0)
+
+labelSizeFromString(string sizeInput) =>
+    sizeInput == 'tiny' ? size.tiny : sizeInput == 'small' ? size.small : size.normal
+
+shouldShow(string selectedType, bool isChoch) =>
+    selectedType == ALL or (selectedType == CHOCH and isChoch) or (selectedType == BOS and not isChoch)
+
+leg(int length) =>
+    var int currentLeg = 0
+    newLegHigh = high[length] > ta.highest(length)
+    newLegLow = low[length] < ta.lowest(length)
+
+    if newLegHigh
+        currentLeg := BEARISH_LEG
+    else if newLegLow
+        currentLeg := BULLISH_LEG
+    currentLeg
+
+updateStructurePivots(int length, bool internal) =>
+    currentLeg = leg(length)
+    newPivot = ta.change(currentLeg) != 0
+    isPivotLow = ta.change(currentLeg) == 1
+    isPivotHigh = ta.change(currentLeg) == -1
+
+    if newPivot and not na(high[length]) and not na(low[length])
+        if isPivotLow
+            pivot p = internal ? internalLow : swingLow
+            p.currentLevel := low[length]
+            p.crossed := false
+            p.barTime := time[length]
+            p.barIndex := bar_index[length]
+        if isPivotHigh
+            pivot p = internal ? internalHigh : swingHigh
+            p.currentLevel := high[length]
+            p.crossed := false
+            p.barTime := time[length]
+            p.barIndex := bar_index[length]
+
+drawStructure(pivot p, string tag, color drawColor, bool internal, string textSizeInput, bool bullish) =>
+    lineStyle = internal ? line.style_dashed : line.style_solid
+    labelStyle = bullish ? label.style_label_down : label.style_label_up
+    textSize = labelSizeFromString(textSizeInput)
+    line.new(chart.point.new(p.barTime, na, p.currentLevel), chart.point.new(time, na, p.currentLevel), xloc = xloc.bar_time, color = drawColor, style = lineStyle)
+    label.new(chart.point.new(na, math.round(0.5 * (p.barIndex + bar_index)), p.currentLevel), tag, xloc = xloc.bar_index, color = color.new(drawColor, 100), textcolor = drawColor, style = labelStyle, size = textSize)
+
+displayStructure(bool internal) =>
+    pivot highPivot = internal ? internalHigh : swingHigh
+    pivot lowPivot = internal ? internalLow : swingLow
+    trend t = internal ? internalTrend : swingTrend
+
+    bullType = internal ? showInternalBullInput : showSwingBullInput
+    bearType = internal ? showInternalBearInput : showSwingBearInput
+    bullColor = internal ? internalBullColorInput : swingBullColorInput
+    bearColor = internal ? internalBearColorInput : swingBearColorInput
+    sizeInput = internal ? internalStructureSize : swingStructureSize
+
+    if not na(highPivot.currentLevel) and ta.crossover(close, highPivot.currentLevel) and not highPivot.crossed
+        isChoch = t.bias == BEARISH
+        if shouldShow(bullType, isChoch)
+            tag = isChoch ? 'CHoCH' : 'BOS'
+            drawStructure(highPivot, tag, bullColor, internal, sizeInput, true)
+        highPivot.crossed := true
+        t.bias := BULLISH
+
+    if not na(lowPivot.currentLevel) and ta.crossunder(close, lowPivot.currentLevel) and not lowPivot.crossed
+        isChoch = t.bias == BULLISH
+        if shouldShow(bearType, isChoch)
+            tag = isChoch ? 'CHoCH' : 'BOS'
+            drawStructure(lowPivot, tag, bearColor, internal, sizeInput, false)
+        lowPivot.crossed := true
+        t.bias := BEARISH
+
+// === SMC Execution ===
+updateStructurePivots(swingsLengthInput, false)
+updateStructurePivots(internalLengthInput, true)
+if showInternalsInput
+    displayStructure(true)
+if showSwingStructureInput
+    displayStructure(false)
+
+// === SuperTrend ===
+src = hlcc4
+atr = ta.atr(atrPeriod)
+up = src - multiplier * atr
+dn = src + multiplier * atr
+
+var float trendUp = na
+var float trendDn = na
+var int trendDir = 1
+var bool breakevenArmed = false
+var int lastCloseBarIndex = na
+
+prevTrendUp = nz(trendUp[1], up)
+prevTrendDn = nz(trendDn[1], dn)
+trendUp := close[1] > prevTrendUp ? math.max(up, prevTrendUp) : up
+trendDn := close[1] < prevTrendDn ? math.min(dn, prevTrendDn) : dn
+trendDir := close > prevTrendDn ? 1 : close < prevTrendUp ? -1 : nz(trendDir[1], 1)
+
+sellSignal = trendDir == -1 and trendDir[1] == 1
+
+// === MTF Filter (lookahead_off to reduce repaint risk) ===
+currentTF = timeframe.isminutes ? timeframe.multiplier : timeframe.isdaily ? 1440 : timeframe.isweekly ? 10080 : timeframe.ismonthly ? 43200 : 100000
+
+weeklyTrend = request.security(syminfo.tickerid, 'W', trendDir, gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+weeklyMomentum = request.security(syminfo.tickerid, 'W', close > close[1], gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+mtfFilter = currentTF < 10080 ? (weeklyTrend == 1 or weeklyMomentum) : true
+
+[_, _, adxValue] = ta.dmi(adxLength, adxLength)
+atrMean = ta.sma(atr, atrVolLength)
+atrRatio = na(atrMean) or atrMean == 0.0 ? 0.0 : atr / atrMean
+regimeFilter = not useRegimeFilter or (adxValue >= adxThreshold and atrRatio >= atrVolMinRatio)
+
+newClosedTrade = strategy.closedtrades > strategy.closedtrades[1]
+if newClosedTrade
+    lastCloseBarIndex := bar_index
+
+barsSinceClose = na(lastCloseBarIndex) ? 1000000 : bar_index - lastCloseBarIndex
+canEnterByCooldown = barsSinceClose > cooldownBars
+isValidStructure = close > ta.highest(high, lb)[1]
+allConditionsMet = trendDir == 1 and isValidStructure and mtfFilter and regimeFilter
+finalBuy = allConditionsMet and not allConditionsMet[1]
+finalSell = sellSignal
+
+inDateRange = useDateFilter ? (time >= startDate and time <= endDate) : true
+
+if finalBuy and inDateRange and canEnterByCooldown and strategy.position_size <= 0
+    strategy.entry('Long', strategy.long)
+
+if finalSell and strategy.position_size > 0
+    strategy.close('Long', comment = 'Close Long')
+
+if useDateFilter and time >= endDate
+    strategy.close_all(comment = 'Close All')
+
+if strategy.position_size > 0 and strategy.position_size[1] <= 0
+    breakevenArmed := false
+if strategy.position_size <= 0
+    breakevenArmed := false
+
+if useLayeredExit and strategy.position_size > 0
+    entryPrice = strategy.position_avg_price
+    fallbackStop = entryPrice - atr * stopAtrMult
+    stopFromTrend = na(trendUp) ? fallbackStop : math.min(trendUp, fallbackStop)
+    baseStop = math.min(stopFromTrend, entryPrice - syminfo.mintick)
+    riskPerUnit = math.max(entryPrice - baseStop, syminfo.mintick)
+
+    if high >= entryPrice + riskPerUnit * breakevenRR
+        breakevenArmed := true
+
+    breakevenStop = entryPrice * (1 + breakevenOffsetPct * 0.01)
+    activeStop = breakevenArmed ? math.max(baseStop, breakevenStop) : baseStop
+    activeStop := useAtrTrail ? math.max(activeStop, close - atr * trailAtrMult) : activeStop
+
+    tp1Price = entryPrice + riskPerUnit * tp1RR
+    tp2Price = entryPrice + riskPerUnit * tp2RR
+
+    strategy.exit('Long-TP1', 'Long', stop = activeStop, limit = tp1Price, qty_percent = tp1Qty)
+    strategy.exit('Long-TP2', 'Long', stop = activeStop, limit = tp2Price, qty_percent = 100 - tp1Qty)
+
+plotshape(finalBuy, title = 'Buy Signal', text = 'Buy', location = location.belowbar, style = shape.labelup, color = color.green, textcolor = color.white, size = size.tiny)
+plotshape(finalSell, title = 'Sell Signal', text = 'Sell', location = location.abovebar, style = shape.labeldown, color = color.red, textcolor = color.white, size = size.tiny)
+
+barcolor(showTrendCandleColorInput ? (trendDir == 1 ? color.new(color.green, 0) : color.new(color.red, 0)) : na)
